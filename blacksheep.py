@@ -14,17 +14,13 @@ from datetime import date
 import httpx
 import asyncio
 import sys
-from rich import print
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 CURRENT_DATE = date.today().strftime("%Y-%m-%d")
+
 POOL = 3
-API_KEY = (
-    "MJE03CF7ZZEGTIPRDZGIHD5CQ496X7HJ9TKOXFJWYQBSUL1KHOYMH17JM05JFVTW5RHJ71VHSN7CHTF1"
-)
-SCRAPINGBEE_URL = "https://app.scrapingbee.com/api/v1/"
 VENUE_LIMIT = 150
 DATA_DIRECTORY = "products"
 
