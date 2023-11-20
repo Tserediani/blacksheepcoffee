@@ -1,8 +1,12 @@
+from enum import Enum
 import json
+import logging
 import os
+import random
 import re
 import ssl
 import time
+from typing import Optional
 import requests
 from pydantic import BaseModel
 import pandas as pd
@@ -10,8 +14,9 @@ from datetime import date
 import httpx
 import asyncio
 import sys
+from rich import print
 
-if sys.platform.startswith('win'):
+if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 CURRENT_DATE = date.today().strftime("%Y-%m-%d")
@@ -29,6 +34,38 @@ CATEGORIES_API_URL = "https://vmos2.vmos.io/catalog/v2/menu"
 MENU_BUNDLES_URL = "https://vmos2.vmos.io/catalog/categories/{category_uuid}/bundles?forceStockStatus=0"
 MENU_ITEM_URL = "https://vmos2.vmos.io/catalog/bundles/{menu_item_uuid}/item-types?forceStockStatus=0"
 MENU_UPSELL_URL = "https://vmos2.vmos.io/catalog/bundles/{menu_item_uuid}/upsell-categories?forceStockStatus=0"
+
+
+# SCRAPINGBEE CONFIGURATION
+SCRAPINGBEE = True
+
+SCRAPINGBEE_API_KEY = (
+    "MJE03CF7ZZEGTIPRDZGIHD5CQ496X7HJ9TKOXFJWYQBSUL1KHOYMH17JM05JFVTW5RHJ71VHSN7CHTF1"
+)
+
+SCRAPINGBEE_URL = "https://app.scrapingbee.com/api/v1/"
+
+SCRAPINGBEE_HEADERS = {
+    "api_key": SCRAPINGBEE_API_KEY,
+    "url": "{url}",
+    "render_js": "false",
+    "forward_headers": "true",
+    "premium_proxy": "false",
+}
+###########################
+
+
+class Method(Enum):
+    GET = "GET"
+    POST = "POST"
+
+
+class RequestError(Exception):
+    ...
+
+
+class MaxRetriesExceededError(RequestError):
+    ...
 
 
 HEADERS = {
@@ -49,8 +86,31 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
     "x-requested-from": "online",
 }
-
+WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(DATA_DIRECTORY, exist_ok=True)
+os.makedirs(os.path.join(WORKING_DIR, "logs"), exist_ok=True)
+
+logger = logging.getLogger("blacksheepcofee_logger")
+
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG)
+
+    logging_formatter = logging.Formatter(
+        "%(asctime)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+
+    # Log file handler.
+    log_filename = f"./logs/blacksheepcoffee_{CURRENT_DATE}.log"
+    file_handler = logging.FileHandler(log_filename)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging_formatter)
+    logger.addHandler(file_handler)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging_formatter)
+    logger.addHandler(console_handler)
 
 
 class Venue(BaseModel):
@@ -150,68 +210,146 @@ def filter_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
         ~dataframe["_stdserve"].str.contains("Add a Snack".lower(), case=False)
     ]
 
-    ## ADD YOUR RULES
+    # ADD YOUR RULES
 
     return dataframe
 
 
-def write(data: pd.DataFrame, filename: str) -> None:
+def write(
+    data: list[BaseModel],
+    scheme: list,
+    filename: str,
+    mode: str = "a",
+) -> None:
+    items = [list(result.model_dump().values()) for result in data]
+    dataframe = pd.DataFrame(items, columns=scheme)
+    dataframe.drop_duplicates(inplace=True)
     try:
-        data.to_csv(
+        dataframe.to_csv(
             filename,
-            header=not os.path.exists(filename),
+            header=not os.path.exists(filename) if mode == "a" else True,
             sep="|",
             encoding="UTF-8",
             index=False,
-            mode="a",
+            mode=mode,
         )
-    except Exception as e:
-        print(e)
-        return
+    except pd.errors.EmptyDataError as e:
+        logger.warning(f"Dataframe is empty. Error Details: {e}")
+    except Exception as exc:
+        logger.critical(f"Failed to write data. Error Details: {exc}", exc_info=True)
+
+async def make_request(
+    url: str,
+    method: Method,
+    headers: dict[str, str],
+    data: str,
+    params: dict[str, str],
+) -> requests.Response:
+    response = None
+    async with httpx.AsyncClient(timeout=15) as client:
+        if method == Method.GET:
+            response = await client.get(url=url, headers=headers, params=params)
+        elif method == Method.POST:
+            response = await client.post(
+                url=url, headers=headers, data=data, params=params
+            )
+        if response and response.status_code == 200:
+            return response
+        else:
+            raise RequestError(f"Invalid response from {url}")
+
+
+async def retry_request(
+    url: str,
+    max_retries: int,
+    method: Method,
+    headers: dict[str, str],
+    params: dict[str, str],
+    data: str,
+    scrapingbee: bool = False,
+    request_details: Optional[str] = ''
+) -> requests.Response:
+    for retry in range(max_retries):
+        try:
+            if scrapingbee:
+                constructed_scrapingbee_api_params = {
+                    **SCRAPINGBEE_HEADERS,
+                    **{"url": url},
+                }
+                spb_headers = {f"Spb-{key}": value for key, value in headers.items()}
+                response = await make_request(
+                    url=SCRAPINGBEE_URL,
+                    method=method,
+                    headers=spb_headers,
+                    params=constructed_scrapingbee_api_params,
+                    data=data,
+                )
+            else:
+                response = await make_request(
+                    url=url, method=method, headers=headers, params=params, data=data
+                )
+            return response
+
+        except (ssl.SSLError, httpx.HTTPError, httpx.RequestError) as error:
+            logger.warning(
+                f"Invalid Request. URL: {url}. Error Details: {repr(error)}. Tries: {retry + 1}/{max_retries}"
+            )
+        except RequestError as error:
+            logger.warning(f"Request Error: {error}. Tries: {retry + 1}/{max_retries}")
+        except Exception as e:
+            logger.warning(
+                f"Exception occurred while requesting {url}. Error Details: {repr(e)}. Tries: {retry + 1}/{max_retries}",
+                exc_info=True,
+            )
+
+        time.sleep(random.uniform(2**retry - 1, 2 ** (retry + 1) - 1))
+
+    logger.error(
+        f"Failed to get a response from URL {url}. Request Details: {request_details}. Error Details: Script exceeded max retries count."
+    )
+    raise MaxRetriesExceededError(f"Max retries exceeded. {url}")
 
 
 async def get_response(
     url: str,
+    method: Method = Method.GET,
     headers: dict[str, str] = None,
+    params: dict[str, str] = None,
+    data: str = "",
     max_retries: int = 3,
-) -> httpx.Response:
+    scrapingbee: bool = False,
+    request_details: Optional[str] = ''
+) -> requests.Response:
+    if params is None:
+        params = {}
     if headers is None:
         headers = {}
-    spb_headers = {f"Spb-{key}": value for key, value in headers.items()}
 
-    async def retry_request(url, retries):
-        async with httpx.AsyncClient() as client:
-            for _ in range(retries):
-                try:
-                    response = await client.get(
-                        url=SCRAPINGBEE_URL,
-                        params={
-                            "api_key": API_KEY,
-                            "url": url,
-                            "premium_proxy": "false",
-                            "render_js": "false",
-                            "forward_headers": "true",
-                        },
-                        headers=spb_headers,
-                    )
-                    response.raise_for_status()
-                    if response.status_code == 200:
-                        return response
-                except (
-                    ssl.SSLError,
-                    httpx.HTTPError,
-                    httpx.RequestError,
-                ) as error:
-                    print(f"Invalid Request. URL: {url}. Error Details: {repr(error)}")
-                    print("Retrying...")
-                time.sleep(2**_)
-            return None
-
-    return await retry_request(url, max_retries)
+    return await retry_request(
+        url=url,
+        method=method,
+        headers=headers,
+        params=params,
+        data=data,
+        max_retries=max_retries,
+        scrapingbee=scrapingbee,
+        request_details = request_details
+    )
 
 
-async def parse_json_response(url: str, headers: dict, max_retries: int = 3) -> dict:
-    response = await get_response(url, headers, max_retries)
+async def parse_json_response(url: str, headers: dict, max_retries: int = 3, request_details: Optional[str] = '') -> dict:
+    try:
+        response = await get_response(
+            url=url,
+            method=Method.GET,
+            headers=headers,
+            max_retries=max_retries,
+            scrapingbee=SCRAPINGBEE,
+            request_details=request_details
+        )
+    except MaxRetriesExceededError:
+        logger.error(f"Failed to scrape {url}. Max retries exceeded.")
+        response = None
     try:
         return response.json()
     except (requests.JSONDecodeError, AttributeError):
@@ -269,24 +407,25 @@ async def process_venues(limit: int) -> list[Venue]:
     venues_json = await get_venues(limit=limit)
 
     venues: list[Venue] = await parse_venues(venues_json=venues_json)
-    venues_schema = list(Venue.__annotations__.keys())
-    venues_data = [list(venue.dict().values()) for venue in venues]
 
-    dataframe = pd.DataFrame(venues_data, columns=venues_schema)
-    write(dataframe, filename=f"venues_{CURRENT_DATE}.txt")
+    write(
+        venues,
+        scheme=list(Venue.__annotations__),
+        filename=f"venues_{CURRENT_DATE}.txt",
+    )
 
     return venues
 
 
-async def get_categories(url: str, venue_uuid: str) -> dict:
+async def get_categories(url: str, venue: Venue) -> dict:
     headers = {
         **HEADERS,
         **{
-            "store": venue_uuid,
+            "store": venue.uuid,
             "menu": "21a7a281-1694-49e3-ab31-717707c8b774",
         },
     }
-    return await parse_json_response(url, headers=headers)
+    return await parse_json_response(url, headers=headers, request_details=f"Getting categories for {venue.name} - {venue.postcode} - {venue.uuid}")
 
 
 async def parse_menu_categories(menu_json: dict):
@@ -311,7 +450,7 @@ async def parse_menu_categories(menu_json: dict):
 
 
 async def process_menu_bundles(
-    venue_uuid: str, categories: list[MenuCategories]
+    venue_name: str, venue_uuid: str, categories: list[MenuCategories]
 ) -> list[MenuBundle]:
     bundles_dir = os.path.join("products", "bundles")
     os.makedirs(bundles_dir, exist_ok=True)
@@ -326,15 +465,21 @@ async def process_menu_bundles(
 
     menu_bundles: list[MenuBundle] = []
     for category in categories:
+        logger.info(
+            f"Extracting products for {venue_name} - {category.menu_name} - {category.category_name}"
+        )
         url = MENU_BUNDLES_URL.format(category_uuid=category.category_uuid)
-        response_json = await parse_json_response(url, headers=headers)
+        response_json = await parse_json_response(url, headers=headers, request_details=f"Getting products for category {venue_name} - {category.menu_name} - {category.category_name}")
         write_json(
             response_json,
-            os.path.join(bundles_dir, f"{venue_uuid}_{category.category_name}.json"),
+            os.path.join(
+                bundles_dir,
+                f"{venue_name.lower()}_{category.category_name.lower()}.json",
+            ),
         )
-        menu_bundles.extend(
-            await parse_menu_bundles(response_json, category.category_name)
-        )
+        menu_bundle = await parse_menu_bundles(response_json, category.category_name)
+        logger.info(f"Found total {len(menu_bundle)} products.")
+        menu_bundles.extend(menu_bundle)
     return menu_bundles
 
 
@@ -380,7 +525,9 @@ async def parse_menu_bundles(
     return menu_bundles
 
 
-async def get_upsell_categories(venue_uuid: str, menu_item: MenuBundle) -> dict:
+async def get_upsell_categories(
+    venue_name: str, venue_uuid: str, menu_item: MenuBundle
+) -> dict:
     items_dir = os.path.join("products", "upsell_categories")
     os.makedirs(items_dir, exist_ok=True)
     headers = {
@@ -388,10 +535,10 @@ async def get_upsell_categories(venue_uuid: str, menu_item: MenuBundle) -> dict:
         **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
     }
     url = MENU_UPSELL_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(url=url, headers=headers)
+    response_json = await parse_json_response(url=url, headers=headers, request_details=f"Getting options for {venue_name} - {menu_item.item_name}")
     write_json(
         response_json,
-        os.path.join(items_dir, f"{venue_uuid}_{menu_item.item_name}.json"),
+        os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
     )
     return response_json
 
@@ -424,7 +571,9 @@ async def parse_upsell_categories(upsell_json: dict) -> list[UpsellCategories]:
     return upsell_categories
 
 
-async def get_menu_item(url: str, venue_uuid: str, menu_item: MenuBundle) -> dict:
+async def get_menu_item(
+    url: str, venue_name: str, venue_uuid: str, menu_item: MenuBundle
+) -> dict:
     items_dir = os.path.join("products", "items")
     os.makedirs(items_dir, exist_ok=True)
     headers = {
@@ -432,10 +581,10 @@ async def get_menu_item(url: str, venue_uuid: str, menu_item: MenuBundle) -> dic
         **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
     }
     url = MENU_ITEM_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(url, headers)
+    response_json = await parse_json_response(url, headers, request_details=f"Getting details for {venue_name} - {menu_item.item_name}")
     write_json(
         response_json,
-        os.path.join(items_dir, f"{venue_uuid}_{menu_item.item_name}.json"),
+        os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
     )
     return response_json
 
@@ -474,22 +623,29 @@ async def parse_menu_options(menu_item_json: dict) -> list[MenuOptions]:
 
 
 async def process_menu(venue: Venue) -> list[MenuModel]:
-    categories_json: dict = await get_categories(CATEGORIES_API_URL, venue.uuid)
+    categories_json: dict = await get_categories(CATEGORIES_API_URL, venue)
     categories: list[MenuCategories] = await parse_menu_categories(categories_json)
-    menu_bundles: list[MenuBundle] = await process_menu_bundles(venue.uuid, categories)
+    logger.info(
+        f"Total {len(categories)} categories will be extracted for {venue.name}"
+    )
+    menu_bundles: list[MenuBundle] = await process_menu_bundles(
+        venue.name, venue.uuid, categories
+    )
 
     async def process_menu_bundle(menu_bundle: MenuBundle):
-        print(
-            f"Current: {venue.name} > {menu_bundle.item_cat} > {menu_bundle.item_subcat} > {menu_bundle.item_name}"
+        upsell_categories_json = await get_upsell_categories(
+            venue_name=venue.name, venue_uuid=venue.uuid, menu_item=menu_bundle
         )
-
-        upsell_categories_json = await get_upsell_categories(venue.uuid, menu_bundle)
         upsell_categories = await parse_upsell_categories(upsell_categories_json)
-        menu_item_json = await get_menu_item(MENU_ITEM_URL, venue.uuid, menu_bundle)
+        menu_item_json = await get_menu_item(
+            MENU_ITEM_URL,
+            venue_name=venue.name,
+            venue_uuid=venue.uuid,
+            menu_item=menu_bundle,
+        )
         menu_item = await parse_menu_options(menu_item_json)
 
         menu_items: list[MenuModel] = []
-
         for item in menu_item:
             menu_items.append(
                 MenuModel(
@@ -517,7 +673,9 @@ async def process_menu(venue: Venue) -> list[MenuModel]:
                     desc=item.item_desc,
                 )
             )
-
+        logger.info(
+            f"Added {len(menu_items)} choices for {venue.name} > {menu_bundle.item_cat} > {menu_bundle.item_subcat} > {menu_bundle.item_name}"
+        )
         return menu_items
 
     semaphore = asyncio.Semaphore(POOL)
@@ -532,11 +690,15 @@ async def process_menu(venue: Venue) -> list[MenuModel]:
 
 
 async def main():
+    logger.info("Getting Venues.")
     venues: list[Venue] = await process_venues(limit=VENUE_LIMIT)
-
-    menu_items: list[MenuModel] = []
-    for venue in venues:
-        menu_items.extend(await process_menu(venue))
+    # venues = [
+    #     Venue(**data.to_dict())
+    #     for i, data in pd.read_csv(
+    #         "venues_2023-11-20.txt", sep="|", dtype=str
+    #     ).iterrows()
+    # ]
+    logger.info(f"Found total {len(venues)} venue[s]")
 
     menu_items_schema = [
         "_date",
@@ -555,13 +717,30 @@ async def main():
         "_stock",
         "_desc",
     ]
+    menu_items: list[MenuModel] = []
+
+    for venue in venues:
+        try:
+            logger.info(f'Current Venue: {venue.name}')
+            menu_items = await process_menu(venue)
+            logger.info(
+                f"Total {len(menu_items)} items and choices were found for venue: {venue.name}"
+            )
+
+            write(
+                menu_items,
+                scheme=menu_items_schema,
+                filename=f"black_sheep_coffee_{CURRENT_DATE}.txt",
+            )
+        except Exception:
+            logger.critical(f"Failed to scrape venue: {venue}", exc_info=True)
 
     # items = [list(item.dict().values()) for item in menu_items]
-
-    items = [list(item.dict(exclude_unset=True).values()) for item in menu_items]
-    dataframe = filter_dataframe(pd.DataFrame(items, columns=menu_items_schema))
-    write(dataframe, f"black_sheep_coffee_{CURRENT_DATE}.csv")
+    # items = [list(item.dict(exclude_unset=True).values()) for item in menu_items]
+    # write(items, f"black_sheep_coffee_{CURRENT_DATE}.txt")
 
 
 if __name__ == "__main__":
+    logger.info("Start of the script.")
     asyncio.run(main())
+    logger.info("End of the script.")
