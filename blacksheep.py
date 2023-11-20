@@ -24,7 +24,6 @@ POOL = 3
 VENUE_LIMIT = 150
 DATA_DIRECTORY = "products"
 
-
 VENUES_URL = "https://vmos2.vmos.io/tenant/v1/stores/tenant?offset=0&postcode=&limit={limit}&sortBy%5B%5D=name&sortBy%5B%5D=sortOrder&sortDir=ASC&status=1&weekday=5"
 CATEGORIES_API_URL = "https://vmos2.vmos.io/catalog/v2/menu"
 MENU_BUNDLES_URL = "https://vmos2.vmos.io/catalog/categories/{category_uuid}/bundles?forceStockStatus=0"
@@ -51,19 +50,6 @@ SCRAPINGBEE_HEADERS = {
 ###########################
 
 
-class Method(Enum):
-    GET = "GET"
-    POST = "POST"
-
-
-class RequestError(Exception):
-    ...
-
-
-class MaxRetriesExceededError(RequestError):
-    ...
-
-
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Encoding": "gzip, deflate, br",
@@ -82,8 +68,10 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
     "x-requested-from": "online",
 }
+
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-os.makedirs(DATA_DIRECTORY, exist_ok=True)
+
+os.makedirs(os.path.join(WORKING_DIR, DATA_DIRECTORY), exist_ok=True)
 os.makedirs(os.path.join(WORKING_DIR, "logs"), exist_ok=True)
 
 logger = logging.getLogger("blacksheepcofee_logger")
@@ -107,6 +95,19 @@ if not logger.handlers:
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging_formatter)
     logger.addHandler(console_handler)
+
+
+class Method(Enum):
+    GET = "GET"
+    POST = "POST"
+
+
+class RequestError(Exception):
+    ...
+
+
+class MaxRetriesExceededError(RequestError):
+    ...
 
 
 class Venue(BaseModel):
@@ -234,6 +235,7 @@ def write(
     except Exception as exc:
         logger.critical(f"Failed to write data. Error Details: {exc}", exc_info=True)
 
+
 async def make_request(
     url: str,
     method: Method,
@@ -263,7 +265,7 @@ async def retry_request(
     params: dict[str, str],
     data: str,
     scrapingbee: bool = False,
-    request_details: Optional[str] = ''
+    request_details: Optional[str] = "",
 ) -> requests.Response:
     for retry in range(max_retries):
         try:
@@ -314,7 +316,7 @@ async def get_response(
     data: str = "",
     max_retries: int = 3,
     scrapingbee: bool = False,
-    request_details: Optional[str] = ''
+    request_details: Optional[str] = "",
 ) -> requests.Response:
     if params is None:
         params = {}
@@ -329,11 +331,13 @@ async def get_response(
         data=data,
         max_retries=max_retries,
         scrapingbee=scrapingbee,
-        request_details = request_details
+        request_details=request_details,
     )
 
 
-async def parse_json_response(url: str, headers: dict, max_retries: int = 3, request_details: Optional[str] = '') -> dict:
+async def parse_json_response(
+    url: str, headers: dict, max_retries: int = 3, request_details: Optional[str] = ""
+) -> dict:
     try:
         response = await get_response(
             url=url,
@@ -341,7 +345,7 @@ async def parse_json_response(url: str, headers: dict, max_retries: int = 3, req
             headers=headers,
             max_retries=max_retries,
             scrapingbee=SCRAPINGBEE,
-            request_details=request_details
+            request_details=request_details,
         )
     except MaxRetriesExceededError:
         logger.error(f"Failed to scrape {url}. Max retries exceeded.")
@@ -421,7 +425,11 @@ async def get_categories(url: str, venue: Venue) -> dict:
             "menu": "21a7a281-1694-49e3-ab31-717707c8b774",
         },
     }
-    return await parse_json_response(url, headers=headers, request_details=f"Getting categories for {venue.name} - {venue.postcode} - {venue.uuid}")
+    return await parse_json_response(
+        url,
+        headers=headers,
+        request_details=f"Getting categories for {venue.name} - {venue.postcode} - {venue.uuid}",
+    )
 
 
 async def parse_menu_categories(menu_json: dict):
@@ -465,7 +473,11 @@ async def process_menu_bundles(
             f"Extracting products for {venue_name} - {category.menu_name} - {category.category_name}"
         )
         url = MENU_BUNDLES_URL.format(category_uuid=category.category_uuid)
-        response_json = await parse_json_response(url, headers=headers, request_details=f"Getting products for category {venue_name} - {category.menu_name} - {category.category_name}")
+        response_json = await parse_json_response(
+            url,
+            headers=headers,
+            request_details=f"Getting products for category {venue_name} - {category.menu_name} - {category.category_name}",
+        )
         write_json(
             response_json,
             os.path.join(
@@ -531,7 +543,11 @@ async def get_upsell_categories(
         **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
     }
     url = MENU_UPSELL_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(url=url, headers=headers, request_details=f"Getting options for {venue_name} - {menu_item.item_name}")
+    response_json = await parse_json_response(
+        url=url,
+        headers=headers,
+        request_details=f"Getting options for {venue_name} - {menu_item.item_name}",
+    )
     write_json(
         response_json,
         os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
@@ -577,7 +593,11 @@ async def get_menu_item(
         **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
     }
     url = MENU_ITEM_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(url, headers, request_details=f"Getting details for {venue_name} - {menu_item.item_name}")
+    response_json = await parse_json_response(
+        url,
+        headers,
+        request_details=f"Getting details for {venue_name} - {menu_item.item_name}",
+    )
     write_json(
         response_json,
         os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
@@ -688,12 +708,6 @@ async def process_menu(venue: Venue) -> list[MenuModel]:
 async def main():
     logger.info("Getting Venues.")
     venues: list[Venue] = await process_venues(limit=VENUE_LIMIT)
-    # venues = [
-    #     Venue(**data.to_dict())
-    #     for i, data in pd.read_csv(
-    #         "venues_2023-11-20.txt", sep="|", dtype=str
-    #     ).iterrows()
-    # ]
     logger.info(f"Found total {len(venues)} venue[s]")
 
     menu_items_schema = [
@@ -717,7 +731,7 @@ async def main():
 
     for venue in venues:
         try:
-            logger.info(f'Current Venue: {venue.name}')
+            logger.info(f"Current Venue: {venue.name}")
             menu_items = await process_menu(venue)
             logger.info(
                 f"Total {len(menu_items)} items and choices were found for venue: {venue.name}"
@@ -730,10 +744,6 @@ async def main():
             )
         except Exception:
             logger.critical(f"Failed to scrape venue: {venue}", exc_info=True)
-
-    # items = [list(item.dict().values()) for item in menu_items]
-    # items = [list(item.dict(exclude_unset=True).values()) for item in menu_items]
-    # write(items, f"black_sheep_coffee_{CURRENT_DATE}.txt")
 
 
 if __name__ == "__main__":
