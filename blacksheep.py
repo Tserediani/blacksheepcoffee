@@ -6,7 +6,7 @@ import random
 import re
 import ssl
 import time
-from typing import Optional
+from typing import Callable, Optional
 import requests
 from pydantic import BaseModel
 import pandas as pd
@@ -192,22 +192,20 @@ def clean(string: str) -> str:
 
 def filter_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
     """Simple function that fiters dataframe."""
+    try:
+        # Dropping where price is zero
+        dataframe = dataframe[dataframe["_price"] != 0]
+        # Drop stdserve values
+        dataframe = dataframe[
+            ~dataframe["_stdserve"].str.contains("Fancy a Waffle?".lower(), case=False)
+        ]
+        dataframe = dataframe[
+            ~dataframe["_stdserve"].str.contains("Add a Snack".lower(), case=False)
+        ]
+        # ADD YOUR RULES
 
-    # Dropping duplicate values
-    dataframe.drop_duplicates(inplace=True)
-
-    # Dropping where price is zero
-    dataframe = dataframe[dataframe["_price"] != 0]
-
-    # Drop stdserve values
-    dataframe = dataframe[
-        ~dataframe["_stdserve"].str.contains("Fancy a Waffle?".lower(), case=False)
-    ]
-    dataframe = dataframe[
-        ~dataframe["_stdserve"].str.contains("Add a Snack".lower(), case=False)
-    ]
-
-    # ADD YOUR RULES
+    except Exception:
+        logger.error("Failed to use filter on dataframe.", exc_info=True)
 
     return dataframe
 
@@ -217,10 +215,13 @@ def write(
     scheme: list,
     filename: str,
     mode: str = "a",
+    custom_filter: Callable[[pd.DataFrame], pd.DataFrame] = None,
 ) -> None:
     items = [list(result.model_dump().values()) for result in data]
     dataframe = pd.DataFrame(items, columns=scheme)
     dataframe.drop_duplicates(inplace=True)
+    if custom_filter:
+        dataframe = filter_dataframe(dataframe)
     try:
         dataframe.to_csv(
             filename,
@@ -708,6 +709,7 @@ async def process_menu(venue: Venue) -> list[MenuModel]:
 async def main():
     logger.info("Getting Venues.")
     venues: list[Venue] = await process_venues(limit=VENUE_LIMIT)
+
     logger.info(f"Found total {len(venues)} venue[s]")
 
     menu_items_schema = [
@@ -736,11 +738,11 @@ async def main():
             logger.info(
                 f"Total {len(menu_items)} items and choices were found for venue: {venue.name}"
             )
-
             write(
                 menu_items,
                 scheme=menu_items_schema,
                 filename=f"black_sheep_coffee_{CURRENT_DATE}.txt",
+                custom_filter=filter_dataframe,
             )
         except Exception:
             logger.critical(f"Failed to scrape venue: {venue}", exc_info=True)
