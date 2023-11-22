@@ -422,18 +422,32 @@ async def process_venues(limit: int) -> list[Venue]:
 
 
 async def get_categories(url: str, venue: Venue) -> dict:
-    headers = {
+
+    response_json = None
+    category_filename = f"{venue.name.lower()}_{venue.postcode}_categories.json"
+    categories_filepath = os.path.join(DATA_DIRECTORY, category_filename)
+    if os.path.exists(categories_filepath):
+        logger.info(f'Using existing categories {categories_filepath}')
+        response_json = read_json(categories_filepath)
+    if not response_json:
+        headers = {
         **HEADERS,
         **{
             "store": venue.uuid,
             "menu": "21a7a281-1694-49e3-ab31-717707c8b774",
         },
     }
-    return await parse_json_response(
-        url,
-        headers=headers,
-        request_details=f"Getting categories for {venue.name} - {venue.postcode} - {venue.uuid}",
-    )
+        response_json = await parse_json_response(
+            url,
+            headers=headers,
+            request_details=f"Getting categories for {venue.name} - {venue.postcode} - {venue.uuid}",
+        )
+        write_json(
+            response_json,
+            categories_filepath
+        )
+
+    return response_json
 
 
 async def parse_menu_categories(menu_json: dict):
