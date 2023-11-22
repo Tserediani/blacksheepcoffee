@@ -363,9 +363,12 @@ def write_json(data: dict, filename: str) -> None:
 
 
 def read_json(filename: str) -> dict:
-    with open(filename, "r") as file:
-        json_data = json.load(file)
-    return json_data
+    try:
+        with open(filename, "r") as file:
+            json_data = json.load(file)
+        return json_data
+    except json.JSONDecodeError:
+        return {}
 
 
 async def get_venues(limit: int) -> dict:
@@ -470,22 +473,24 @@ async def process_menu_bundles(
 
     menu_bundles: list[MenuBundle] = []
     for category in categories:
+        bundle_filepath = os.path.join(
+            bundles_dir, f"{venue_name.lower()}_{category.category_name.lower()}.json"
+        )
         logger.info(
             f"Extracting products for {venue_name} - {category.menu_name} - {category.category_name}"
         )
-        url = MENU_BUNDLES_URL.format(category_uuid=category.category_uuid)
-        response_json = await parse_json_response(
-            url,
-            headers=headers,
-            request_details=f"Getting products for category {venue_name} - {category.menu_name} - {category.category_name}",
-        )
-        write_json(
-            response_json,
-            os.path.join(
-                bundles_dir,
-                f"{venue_name.lower()}_{category.category_name.lower()}.json",
-            ),
-        )
+        response_json = None
+        if os.path.exists(bundle_filepath):
+            logger.info(f"Using local JSON file {bundle_filepath}")
+            response_json = read_json(bundle_filepath)
+        if not response_json:
+            url = MENU_BUNDLES_URL.format(category_uuid=category.category_uuid)
+            response_json = await parse_json_response(
+                url,
+                headers=headers,
+                request_details=f"Getting products for category {venue_name} - {category.menu_name} - {category.category_name}",
+            )
+            write_json(response_json, bundle_filepath)
         menu_bundle = await parse_menu_bundles(response_json, category.category_name)
         logger.info(f"Found total {len(menu_bundle)} products.")
         menu_bundles.extend(menu_bundle)
@@ -538,21 +543,29 @@ async def get_upsell_categories(
     venue_name: str, venue_uuid: str, menu_item: MenuBundle
 ) -> dict:
     items_dir = os.path.join("products", "upsell_categories")
+    items_filepath = os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json")
     os.makedirs(items_dir, exist_ok=True)
-    headers = {
-        **HEADERS,
-        **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
-    }
-    url = MENU_UPSELL_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(
-        url=url,
-        headers=headers,
-        request_details=f"Getting options for {venue_name} - {menu_item.item_name}",
-    )
-    write_json(
-        response_json,
-        os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
-    )
+    response_json = None
+    if os.path.exists(items_filepath):
+        logger.info(f"Using local JSON file. {items_filepath}")
+        response_json = read_json(items_filepath)
+
+    if not response_json:
+        headers = {
+            **HEADERS,
+            **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
+        }
+        url = MENU_UPSELL_URL.format(menu_item_uuid=menu_item.item_uuid)
+        response_json = await parse_json_response(
+            url=url,
+            headers=headers,
+            request_details=f"Getting options for {venue_name} - {menu_item.item_name}",
+        )
+        write_json(
+            response_json,
+            items_filepath,
+        )
+
     return response_json
 
 
@@ -588,21 +601,28 @@ async def get_menu_item(
     url: str, venue_name: str, venue_uuid: str, menu_item: MenuBundle
 ) -> dict:
     items_dir = os.path.join("products", "items")
+    items_filepath = os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json")
     os.makedirs(items_dir, exist_ok=True)
-    headers = {
-        **HEADERS,
-        **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
-    }
-    url = MENU_ITEM_URL.format(menu_item_uuid=menu_item.item_uuid)
-    response_json = await parse_json_response(
-        url,
-        headers,
-        request_details=f"Getting details for {venue_name} - {menu_item.item_name}",
-    )
-    write_json(
-        response_json,
-        os.path.join(items_dir, f"{venue_name}_{menu_item.item_name}.json"),
-    )
+    response_json = None
+    if os.path.exists(items_filepath):
+        logger.info(f"Using local JSON file {items_filepath}")
+        response_json = read_json(items_filepath)
+
+    if not response_json:
+        headers = {
+            **HEADERS,
+            **{"store": venue_uuid, "menu": "21a7a281-1694-49e3-ab31-717707c8b774"},
+        }
+        url = MENU_ITEM_URL.format(menu_item_uuid=menu_item.item_uuid)
+        response_json = await parse_json_response(
+            url,
+            headers,
+            request_details=f"Getting details for {venue_name} - {menu_item.item_name}",
+        )
+        write_json(
+            response_json,
+            items_filepath,
+        )
     return response_json
 
 
